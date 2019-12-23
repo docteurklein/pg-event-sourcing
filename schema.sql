@@ -24,22 +24,36 @@ create table es.active_users (
     updated_at timestamptz not null
 );
 
-create rule user_registered as on insert to es.events
-where type = 'user_registered' do also
-insert into es.active_users
-(user_id          ,  name                 ,  sha256                 ,  updated_at) values
-(new.aggregate_id ,  new.payload->>'name' ,  new.payload->>'sha256' ,  new.added_at);
+create or replace function es.trigger_project() returns trigger language plpgsql as $$
+begin
+    perform es.project(new);
+    return null;
+end;
+$$;
 
-create rule user_changed_password as on insert to es.events
-where type = 'user_changed_password' do also
-update es.active_users set
-sha256 = new.payload->>'sha256',
-updated_at = new.added_at
-where user_id = new.aggregate_id;
+create or replace function es.project(event es.events) returns void
+language plpgsql as $$
+begin
+    case event.type
+        when 'user_registered' then
+            insert into es.active_users
+            (user_id            ,  name                   ,  sha256                   ,  updated_at) values
+            (event.aggregate_id ,  event.payload->>'name' ,  event.payload->>'sha256' ,  event.added_at);
+        when 'user_changed_password' then
+            update es.active_users set
+            sha256 = event.payload->>'sha256',
+            updated_at = event.added_at
+            where user_id = event.aggregate_id;
+        when 'user_banned' then
+            delete from es.active_users
+            where user_id = event.aggregate_id;
+        else
+            raise notice 'no case for event "%"', event.type;
+    end case;
+end;
+$$;
 
-create rule user_banned as on insert to es.events
-where type = 'user_banned' do also
-delete from es.active_users
-where user_id = new.aggregate_id;
+create trigger on_event_insert after insert on es.events
+for each row execute function es.trigger_project();
 
 commit;
